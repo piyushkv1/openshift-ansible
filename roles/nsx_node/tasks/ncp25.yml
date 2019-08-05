@@ -1,0 +1,50 @@
+---
+- when: not os_firewall_use_firewalld | default(False) | bool
+  tags: nsx_node
+  block:
+  - name: NSX | Iptables allow nodePort
+    iptables:
+      action: insert
+      chain: FORWARD
+      ctstate: ESTABLISHED,RELATED
+      jump: ACCEPT
+      comment: NSX
+
+  - name: NSX | Iptables allow DNS tcp
+    iptables:
+      action: insert
+      chain: OS_FIREWALL_ALLOW
+      protocol: tcp
+      destination_port: 53
+      ctstate: NEW,ESTABLISHED,RELATED
+      jump: ACCEPT
+      comment: NSX
+
+  - name: NSX | Iptables allow DNS udp
+    iptables:
+      action: insert
+      chain: OS_FIREWALL_ALLOW
+      protocol: udp
+      destination_port: 53
+      ctstate: NEW
+      jump: ACCEPT
+      comment: NSX
+
+  - name: NSX | Save iptables rules
+    command: service iptables save
+    args:
+      warn: False
+
+  - name: NSX | Firewalld allow DNS tcp
+    firewalld:
+      port: 53/tcp
+      permanent: true
+      immediate: true
+      state: enabled
+
+  - name: NSX | Firewalld allow DNS udp
+    firewalld:
+      port: 53/udp
+      permanent: true
+      immediate: true
+      state: enabled

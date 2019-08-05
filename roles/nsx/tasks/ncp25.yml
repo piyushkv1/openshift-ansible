@@ -1,0 +1,108 @@
+---
+- name: NSX | Run kube proxy
+  run_once: true
+  import_role:
+    name: kube_proxy_and_dns
+
+- name: NSX | Make directory for nsx yaml
+  file:
+    path: /etc/nsx-ujo
+    state: directory
+    mode: 0755
+  tags: nsx
+
+- name: Checking for /etc/nsx-ujo/ca.crt
+  stat:
+    path: /etc/nsx-ujo/ca.crt
+    get_checksum: false
+    get_attributes: false
+    get_mime: false
+  register: ca_stat
+  tags: nsx
+
+- name: NSX | Generate default LB CA key
+  command: openssl genrsa -out /etc/nsx-ujo/ca.key 4096
+  when: not ca_stat.stat.exists
+  tags: nsx
+
+- name: NSX | Request default LB CA cert
+  command: openssl req -key /etc/nsx-ujo/ca.key -new -x509 -days 365 -sha256 -extensions v3_ca -out /etc/nsx-ujo/ca.crt -subj "/C=US/ST=CA/L=Palo Alto/O=OS3/OU=Eng/CN=nsx.default.corp.local"
+  when: not ca_stat.stat.exists
+  tags: nsx
+
+- name: Checking for "{{ nsx_lb_default_cert }}"
+  stat:
+    path: "{{ nsx_lb_default_cert }}"
+    get_checksum: false
+    get_attributes: false
+    get_mime: false
+  register: lb_default_stat
+  tags: nsx
+
+- name: NSX | Request default LB csr
+  command: openssl req -out /etc/nsx-ujo/lb-default.csr -new -newkey rsa:2048 -nodes -keyout {{ nsx_lb_default_key }} -subj "/C=US/ST=CA/L=Palo Alto/O=OS3/OU=Eng/CN=nsx.default.corp.local"
+  when: not lb_default_stat.stat.exists
+  tags: nsx
+
+- name: NSX | Request default LB cert
+  command: openssl x509 -req -days 360 -in /etc/nsx-ujo/lb-default.csr -CA /etc/nsx-ujo/ca.crt -CAkey /etc/nsx-ujo/ca.key -CAcreateserial -out {{ nsx_lb_default_cert }} -sha256
+  when: not lb_default_stat.stat.exists
+  tags: nsx
+
+- name: NSX | Create namespace nsx-system
+  oc_project:
+    state: present
+    name: nsx-system
+
+- name: NSX | Create LB secret from cert
+  oc_secret:
+    state: present
+    namespace: nsx-system
+    name: nsx-lb-cert
+    files:
+      - name: lb-cert.crt
+        path: "{{ nsx_lb_default_cert }}"
+      - name: lb-key.key
+        path: "{{ nsx_lb_default_key }}"
+  run_once: true
+  tags: nsx
+
+- name: NSX | Create auth secret from cert
+  oc_secret:
+    state: present
+    namespace: nsx-system
+    name: nsx-auth-cert
+    files:
+      - name: nsx-auth.crt
+        path: "{{ nsx_api_cert }}"
+      - name: nsx-auth.key
+        path: "{{ nsx_api_private_key }}"
+  when: nsx_api_cert is defined
+  run_once: true
+  tags: nsx
+
+- name: NSX | disable OCP ingressIP management on svc type LB
+  yedit:
+    src: /etc/origin/master/master-config.yaml
+    edits:
+      - key: networkConfig.ingressIPNetworkCIDR
+        value: "0.0.0.0/32"
+  notify: restart master
+  when: nsx_use_loadbalancer | bool
+  tags: nsx
+
+- name: NSX | Write NSX NCP openshift yaml to root directory
+  template:
+    src: "{{ item.src }}"
+    dest: "~/{{ item.dest }}"
+    mode: 0555
+  with_items:
+    - {src: '{{ nsx_ncp_yml }}.j2', dest: '{{ nsx_ncp_yml }}'}
+  tags: nsx
+
+- name: NSX | Apply NCP configmap
+  command: >
+    {{ openshift_client_binary }}
+    --config={{ openshift.common.config_base }}/master/admin.kubeconfig
+    apply -f ~/{{ nsx_ncp_yml }}
+  tags: nsx
